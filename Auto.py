@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+import zipfile
 
-st.set_page_config(page_title="GST Auto-Fill Template Tool", layout="wide")
-st.title("📥 Auto-Fill GST Template from Books & GST Data (Combined Tabs)")
+st.set_page_config(page_title="GST & Books Auto-Fill Tool", layout="wide")
+st.title("📥 Auto-Fill GST & Books Templates (Merged Sheets)")
 
 # ---------------------------
 # Template Columns
@@ -15,7 +16,7 @@ template_columns = [
 ]
 
 # ---------------------------
-# Books Column Mapping
+# Column Mappings
 # ---------------------------
 books_column_map = {
     "GSTIN/UIN OF RECIPIENT": ["Original Customer Billing GSTIN", "Customer GSTIN", "GSTIN", "My GSTIN"],
@@ -32,9 +33,6 @@ books_column_map = {
     "IRN NUMBER": ["IRN Number", "IRN"]
 }
 
-# ---------------------------
-# GST Column Mapping
-# ---------------------------
 gst_column_map = {
     "GSTIN/UIN OF RECIPIENT": ["GSTIN/UIN of Recipient"],
     "RECEIVER NAME": ["Receiver Name"],
@@ -53,14 +51,6 @@ gst_column_map = {
 # ---------------------------
 # Helper Functions
 # ---------------------------
-def read_file(uploaded_file, sheet_name=None):
-    if uploaded_file.name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file, dtype=str)
-    else:
-        df = pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str)
-    df.columns = df.columns.str.strip().str.upper()
-    return df
-
 def map_columns(df, column_map):
     mapped_df = pd.DataFrame(columns=template_columns)
     df_cols_upper = {col.upper(): col for col in df.columns}
@@ -86,53 +76,59 @@ st.subheader("Upload Files")
 books_file = st.file_uploader("Upload Books Data (Excel/CSV)", type=["xlsx","xls","csv"])
 gst_file = st.file_uploader("Upload GST Portal Data (Excel/CSV with multiple sheets)", type=["xlsx","xls","csv"])
 
-# ---------------------------
-# Process Books Data
-# ---------------------------
-if books_file:
-    books_df = read_file(books_file)
-    books_template_df = map_columns(books_df, books_column_map)
-    books_template_df = preprocess_df(books_template_df)
+if books_file or gst_file:
+    # ---------------- Books Processing ----------------
+    if books_file:
+        books_xl = pd.ExcelFile(books_file)
+        books_sheets = books_xl.sheet_names
+        selected_books_sheets = st.multiselect("Select Books Sheets to Auto-Fill", books_sheets, default=[books_sheets[0]])
 
-    output_books = BytesIO()
-    with pd.ExcelWriter(output_books, engine="openpyxl") as writer:
-        books_template_df.to_excel(writer, index=False, sheet_name="Books_Template")
-    output_books.seek(0)
+        combined_books_df = pd.DataFrame(columns=template_columns)
+        for sheet in selected_books_sheets:
+            df = pd.read_excel(books_file, sheet_name=sheet, dtype=str)
+            df.columns = df.columns.str.strip().str.upper()
+            mapped_df = map_columns(df, books_column_map)
+            mapped_df = preprocess_df(mapped_df)
+            combined_books_df = pd.concat([combined_books_df, mapped_df], ignore_index=True)
 
-    st.download_button(
-        "📥 Download Books Auto-Filled Template",
-        output_books,
-        "Books_AutoFilled_Template.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    # ---------------- GST Processing ----------------
+    if gst_file:
+        gst_xl = pd.ExcelFile(gst_file)
+        gst_sheets = gst_xl.sheet_names
+        selected_gst_sheets = st.multiselect("Select GST Sheets to Auto-Fill", gst_sheets, default=gst_sheets)
 
-# ---------------------------
-# Process GST Portal Data (multi-sheet combined)
-# ---------------------------
-if gst_file:
-    gst_xl = pd.ExcelFile(gst_file)
-    sheet_names = gst_xl.sheet_names
-    selected_sheets = st.multiselect("Select GST Sheets to Auto-Fill", sheet_names)
+        combined_gst_df = pd.DataFrame(columns=template_columns)
+        for sheet in selected_gst_sheets:
+            df = pd.read_excel(gst_file, sheet_name=sheet, dtype=str)
+            df.columns = df.columns.str.strip().str.upper()
+            mapped_df = map_columns(df, gst_column_map)
+            mapped_df = preprocess_df(mapped_df)
+            combined_gst_df = pd.concat([combined_gst_df, mapped_df], ignore_index=True)
 
-    combined_gst_df = pd.DataFrame(columns=template_columns)
+    # ---------------- Create ZIP ----------------
+    if (books_file and not combined_books_df.empty) or (gst_file and not combined_gst_df.empty):
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+            if books_file and not combined_books_df.empty:
+                books_bytes = BytesIO()
+                with pd.ExcelWriter(books_bytes, engine="openpyxl") as writer:
+                    combined_books_df.to_excel(writer, index=False, sheet_name="Books_Template")
+                books_bytes.seek(0)
+                zip_file.writestr("Books_AutoFilled_Template.xlsx", books_bytes.getvalue())
 
-    for sheet in selected_sheets:
-        gst_df = read_file(gst_file, sheet_name=sheet)
-        gst_template_df = map_columns(gst_df, gst_column_map)
-        gst_template_df = preprocess_df(gst_template_df)
-        combined_gst_df = pd.concat([combined_gst_df, gst_template_df], ignore_index=True)
+            if gst_file and not combined_gst_df.empty:
+                gst_bytes = BytesIO()
+                with pd.ExcelWriter(gst_bytes, engine="openpyxl") as writer:
+                    combined_gst_df.to_excel(writer, index=False, sheet_name="GST_Combined_Template")
+                gst_bytes.seek(0)
+                zip_file.writestr("GST_AutoFilled_Combined_Template.xlsx", gst_bytes.getvalue())
 
-    if not combined_gst_df.empty:
-        output_gst = BytesIO()
-        with pd.ExcelWriter(output_gst, engine="openpyxl") as writer:
-            combined_gst_df.to_excel(writer, index=False, sheet_name="GST_Combined_Template")
-        output_gst.seek(0)
-
+        zip_buffer.seek(0)
         st.download_button(
-            "📥 Download Combined GST Auto-Filled Template",
-            output_gst,
-            "GST_AutoFilled_Combined_Template.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "📥 Download Both Templates (ZIP)",
+            zip_buffer,
+            "GST_Books_Templates.zip",
+            "application/zip"
         )
 
-st.info("Upload Books and/or GST data above. You can select multiple GST sheets; all selected tabs will be combined into a single template.")
+st.info("Select one or more sheets from Books and GST files. All selected sheets are merged into a single template per file, then both templates are provided in a ZIP download.")
