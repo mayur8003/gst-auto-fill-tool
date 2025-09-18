@@ -76,16 +76,22 @@ st.subheader("Upload Files")
 books_file = st.file_uploader("Upload Books Data (Excel/CSV)", type=["xlsx","xls","csv"])
 gst_file = st.file_uploader("Upload GST Portal Data (Excel/CSV with multiple sheets)", type=["xlsx","xls","csv"])
 
+# ---------------------------
+# Header Row Inputs
+# ---------------------------
+books_header_row = st.number_input("Header row for Books file (1-based)", min_value=1, value=1)
+gst_header_row = st.number_input("Header row for GST file (1-based)", min_value=1, value=4)
+
 if books_file or gst_file:
     # ---------------- Books Processing ----------------
     if books_file:
         books_xl = pd.ExcelFile(books_file)
         books_sheets = books_xl.sheet_names
-        selected_books_sheets = st.multiselect("Select Books Sheets to Auto-Fill", books_sheets, default=[books_sheets[0]])
+        selected_books_sheets = st.multiselect("Select Books Sheets to Auto-Fill", books_sheets, default=books_sheets)
 
         combined_books_df = pd.DataFrame(columns=template_columns)
         for sheet in selected_books_sheets:
-            df = pd.read_excel(books_file, sheet_name=sheet, dtype=str)
+            df = pd.read_excel(books_file, sheet_name=sheet, header=books_header_row-1, dtype=str)
             df.columns = df.columns.str.strip().str.upper()
             mapped_df = map_columns(df, books_column_map)
             mapped_df = preprocess_df(mapped_df)
@@ -99,7 +105,7 @@ if books_file or gst_file:
 
         combined_gst_df = pd.DataFrame(columns=template_columns)
         for sheet in selected_gst_sheets:
-            df = pd.read_excel(gst_file, sheet_name=sheet, dtype=str)
+            df = pd.read_excel(gst_file, sheet_name=sheet, header=gst_header_row-1, dtype=str)
             df.columns = df.columns.str.strip().str.upper()
             mapped_df = map_columns(df, gst_column_map)
             mapped_df = preprocess_df(mapped_df)
