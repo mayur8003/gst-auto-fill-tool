@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 import zipfile
+import re
 
 st.set_page_config(page_title="GST & Books Auto-Fill Tool", layout="wide")
 st.title("📥 Auto-Fill GST & Books Templates (Merged Sheets)")
@@ -19,7 +20,7 @@ template_columns = [
 # Column Mappings
 # ---------------------------
 books_column_map = {
-    "GSTIN/UIN OF RECIPIENT": ["Original Customer Billing GSTIN", "Customer GSTIN", "GSTIN", "My GSTIN"],
+    "GSTIN/UIN OF RECIPIENT": ["Original Customer Billing GSTIN", "Customer GSTIN", "GSTIN", "Customer Billing GSTIN"],
     "RECEIVER NAME": ["Customer Name", "Receiver Name", "Billed To Name", "Customer Billing Name"], 
     "INVOICE NO": ["Original Invoice Number (In case of amendment)", "Invoice Number", "Bill No", "Voucher Number of Linked Advance Receipt", "Document Number"], 
     "INVOICE DATE": ["Original Invoice Date (In case of amendment)", "Invoice Date", "Bill Date", "Date of Linked Advance Receipt", "Document Date"], 
@@ -51,22 +52,75 @@ gst_column_map = {
 # ---------------------------
 # Helper Functions
 # ---------------------------
+def clean_column_name(col):
+    """Clean column names for consistent mapping."""
+    if not isinstance(col, str):
+        col = str(col)
+    col = col.strip()
+    col = re.sub(r'\s+', ' ', col)   # replace multiple spaces with single space
+    col = re.sub(r'\W', '', col)     # remove non-alphanumeric characters
+    return col.upper()
+
 def map_columns(df, column_map):
+    """Map any dataframe to template columns, robust to messy headers."""
     mapped_df = pd.DataFrame(columns=template_columns)
-    df_cols_upper = {col.upper(): col for col in df.columns}
+
+    # Clean dataframe columns
+    df_cols_clean = {clean_column_name(col): col for col in df.columns}
+
     for template_col, possible_cols in column_map.items():
+        mapped = False
         for col in possible_cols:
-            if col.upper() in df_cols_upper:
-                mapped_df[template_col] = df[df_cols_upper[col.upper()]]
+            col_clean = clean_column_name(col)
+            if col_clean in df_cols_clean:
+                mapped_df[template_col] = df[df_cols_clean[col_clean]]
+                mapped = True
                 break
-        else:
+        if not mapped:
             mapped_df[template_col] = ""
     return mapped_df
 
 def preprocess_df(df):
-    for col in ["INVOICE VALUE","TAXABLE VALUE","INTEGRATED TAX","CENTRAL TAX","STATE/UT TAX"]:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    df["INVOICE DATE"] = pd.to_datetime(df["INVOICE DATE"], errors='coerce').dt.strftime('%d-%m-%Y')
+    """Robust preprocessing for numeric and date columns."""
+
+    # ---- Numeric columns ----
+    numeric_cols = ["INVOICE VALUE","TAXABLE VALUE","INTEGRATED TAX","CENTRAL TAX","STATE/UT TAX"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    # ---- Date column ----
+    if "INVOICE DATE" in df.columns:
+        def normalize_date(val):
+            if pd.isna(val) or str(val).strip() == "":
+                return ""
+            val_str = str(val).strip().split(" ")[0]
+
+            # Case 1: Excel serial numbers
+            if str(val_str).replace(".", "").isdigit():
+                try:
+                    return (pd.to_datetime("1899-12-30") 
+                            + pd.to_timedelta(int(float(val_str)), unit="D")
+                           ).strftime("%d-%m-%Y")
+                except:
+                    pass
+
+            # Case 2: Try common formats
+            for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d", "%Y/%m/%d"):
+                try:
+                    dt = pd.to_datetime(val_str, format=fmt, errors="raise", dayfirst=True)
+                    return dt.strftime("%d-%m-%Y")
+                except:
+                    continue
+
+            # Case 3: Fallback to pandas auto parse
+            try:
+                return pd.to_datetime(val_str, errors="coerce", dayfirst=True).strftime("%d-%m-%Y")
+            except:
+                return ""
+
+        df["INVOICE DATE"] = df["INVOICE DATE"].apply(normalize_date)
+
     return df
 
 # ---------------------------
@@ -83,6 +137,7 @@ books_header_row = st.number_input("Header row for Books file (1-based)", min_va
 gst_header_row = st.number_input("Header row for GST file (1-based)", min_value=1, value=4)
 
 if books_file or gst_file:
+
     # ---------------- Books Processing ----------------
     if books_file:
         books_xl = pd.ExcelFile(books_file)
@@ -92,7 +147,6 @@ if books_file or gst_file:
         combined_books_df = pd.DataFrame(columns=template_columns)
         for sheet in selected_books_sheets:
             df = pd.read_excel(books_file, sheet_name=sheet, header=books_header_row-1, dtype=str)
-            df.columns = df.columns.str.strip().str.upper()
             mapped_df = map_columns(df, books_column_map)
             mapped_df = preprocess_df(mapped_df)
             combined_books_df = pd.concat([combined_books_df, mapped_df], ignore_index=True)
@@ -106,7 +160,6 @@ if books_file or gst_file:
         combined_gst_df = pd.DataFrame(columns=template_columns)
         for sheet in selected_gst_sheets:
             df = pd.read_excel(gst_file, sheet_name=sheet, header=gst_header_row-1, dtype=str)
-            df.columns = df.columns.str.strip().str.upper()
             mapped_df = map_columns(df, gst_column_map)
             mapped_df = preprocess_df(mapped_df)
             combined_gst_df = pd.concat([combined_gst_df, mapped_df], ignore_index=True)
